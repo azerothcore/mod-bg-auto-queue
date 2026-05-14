@@ -1,0 +1,76 @@
+#
+# Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license: https://www.gnu.org/licenses/agpl-3.0.txt
+#
+
+[worldserver]
+
+###################################################################################################
+# mod-bg-auto-queue
+#
+#    BgAutoQueue.Enable
+#        Description: Enable the automatic battleground queue on login.
+#                     When enabled, every eligible player will be enqueued
+#                     automatically into the configured battleground on login.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+BgAutoQueue.Enable = 1
+
+#
+#    BgAutoQueue.Level.Min
+#        Description: Minimum character level for which the automatic queue is
+#                     applied. Players below this level are skipped.
+#        Default:     10
+#
+
+BgAutoQueue.Level.Min = 10
+
+#
+#    BgAutoQueue.Level.Max
+#        Description: Maximum character level for which the automatic queue is
+#                     applied. Players above this level are skipped.
+#        Default:     59
+#
+
+BgAutoQueue.Level.Max = 59
+
+#
+#    BgAutoQueue.Battleground
+#        Description: Battleground to enqueue the player into on login.
+#                     If the chosen battleground is unavailable for the
+#                     player's level, the module falls back to Warsong Gulch.
+#        Default:     0 - Random Battleground
+#                     1 - Warsong Gulch
+#                     2 - Arathi Basin
+#                     3 - Eye of the Storm
+#                     4 - Alterac Valley
+#                     5 - Strand of the Ancients
+#                     6 - Isle of Conquest
+#
+
+BgAutoQueue.Battleground = 0
+
+#
+#    BgAutoQueue.Interval
+#        Description: Interval, in minutes, between automatic battleground
+#                     queue passes. On every tick, every eligible online
+#                     player that hasn't opted out is enqueued into the
+#                     configured battleground.
+#                     Set to 0 to disable the periodic pass entirely.
+#
+#        Default:     45
+#
+
+BgAutoQueue.Interval = 45
+
+#
+#    BgAutoQueue.BroadcastMessage
+#        Description: System message sent to every eligible online player
+#                     two minutes before the periodic queue pass fires.
+#        Default:     "BG Event starting in 2 minutes, you can opt-out by typing \".bgevents off\". You can always join manually by pressing H and going to the BG tab"
+#
+
+BgAutoQueue.BroadcastMessage = "BG Event starting in 2 minutes, you can opt-out by typing \".bgevents off\". You can always join manually by pressing H and going to the BG tab"
+
+###################################################################################################

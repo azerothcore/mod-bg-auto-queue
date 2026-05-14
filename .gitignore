@@ -1,0 +1,6 @@
+*.user
+*.swp
+*.swo
+.vscode/
+.idea/
+build/

@@ -68,9 +68,9 @@ BgAutoQueue.Interval = 45
 #    BgAutoQueue.BroadcastMessage
 #        Description: System message sent to every eligible online player
 #                     two minutes before the periodic queue pass fires.
-#        Default:     "BG Event starting in 2 minutes, you can opt-out by typing \".bgevents off\". You can always join manually by pressing H and going to the BG tab"
+#        Default:     "BG Event starting in 2 minutes, you can opt-out by typing .bgevents off. You can always join manually by pressing H and going to the BG tab"
 #
 
-BgAutoQueue.BroadcastMessage = "BG Event starting in 2 minutes, you can opt-out by typing \".bgevents off\". You can always join manually by pressing H and going to the BG tab"
+BgAutoQueue.BroadcastMessage = "BG Event starting in 2 minutes, you can opt-out by typing .bgevents off. You can always join manually by pressing H and going to the BG tab"
 
 ###################################################################################################

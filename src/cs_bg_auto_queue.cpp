@@ -7,6 +7,7 @@
 #include "Chat.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "Util.h"
 
 using namespace Acore::ChatCommands;
 
@@ -19,9 +20,10 @@ public:
     {
         static ChatCommandTable bgAutoQueueTable =
         {
-            { "on",     HandleBgAutoQueueOnCommand,     SEC_PLAYER, Console::No },
-            { "off",    HandleBgAutoQueueOffCommand,    SEC_PLAYER, Console::No },
-            { "status", HandleBgAutoQueueStatusCommand, SEC_PLAYER, Console::No },
+            { "on",     HandleBgAutoQueueOnCommand,     SEC_PLAYER,        Console::No  },
+            { "off",    HandleBgAutoQueueOffCommand,    SEC_PLAYER,        Console::No  },
+            { "status", HandleBgAutoQueueStatusCommand, SEC_PLAYER,        Console::No  },
+            { "run",    HandleBgAutoQueueRunCommand,    SEC_GAMEMASTER,    Console::Yes },
         };
 
         static ChatCommandTable commandTable =
@@ -42,7 +44,7 @@ public:
         }
 
         sBgAutoQueue->SetOptOut(player->GetGUID(), false);
-        handler->SendSysMessage("Battleground auto-join enabled. You will be queued automatically on next login.");
+        handler->SendSysMessage("Battleground events enabled for your character.");
         return true;
     }
 
@@ -56,7 +58,7 @@ public:
         }
 
         sBgAutoQueue->SetOptOut(player->GetGUID(), true);
-        handler->SendSysMessage("Battleground auto-join disabled. You will not be queued automatically on login.");
+        handler->SendSysMessage("Battleground events disabled for your character. You will not be auto-queued. Use .bgevents on to opt back in.");
         return true;
     }
 
@@ -69,15 +71,25 @@ public:
             return false;
         }
 
-        bool optedOut = sBgAutoQueue->IsOptedOut(player->GetGUID());
-        if (optedOut)
-            handler->SendSysMessage("Battleground auto-join is currently DISABLED for your character.");
+        if (sBgAutoQueue->IsOptedOut(player->GetGUID()))
+            handler->SendSysMessage("Battleground events are currently DISABLED for your character.");
         else
-            handler->SendSysMessage("Battleground auto-join is currently ENABLED for your character.");
+            handler->SendSysMessage("Battleground events are currently ENABLED for your character.");
 
-        if (!sBgAutoQueue->IsEnabled())
-            handler->SendSysMessage("Note: the auto-join feature is globally disabled by the server configuration.");
+        uint32 msToNext = sBgAutoQueue->GetTimeUntilNextPass();
+        if (sBgAutoQueue->IsEnabled() && msToNext > 0)
+            handler->PSendSysMessage("Next scheduled event in {}.", secsToTimeString(msToNext / 1000));
+        else
+            handler->SendSysMessage("There are no scheduled events (an administrator may still trigger one).");
 
+        return true;
+    }
+
+    static bool HandleBgAutoQueueRunCommand(ChatHandler* handler)
+    {
+        // Fires an immediate queue pass regardless of Enable/Interval without touching the periodic timer
+        sBgAutoQueue->RunQueuePass();
+        handler->SendSysMessage("Battleground event queue pass executed.");
         return true;
     }
 };

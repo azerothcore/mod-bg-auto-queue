@@ -1,25 +1,54 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
+ */
+
 #include "BgAutoQueue.h"
 
+#include "AreaDefines.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundQueue.h"
 #include "Chat.h"
 #include "Config.h"
+#include "Containers.h"
 #include "DBCStores.h"
 #include "DatabaseEnv.h"
+#include "DisableMgr.h"
+#include "LFGMgr.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "StringConvert.h"
+#include "Tokenize.h"
+#include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+#include <limits>
+#include <unordered_map>
+
 namespace
 {
-    constexpr uint32 BG_AUTO_QUEUE_WARNING_LEAD_MS = 2u * 60u * 1000u;  // 2 minutes
+    // Used as reference (Warsong Gulch spans for every eligible level)
+    constexpr uint32 BG_BRACKET_REFERENCE_MAP = MAP_WARSONG_GULCH; // 489
+
+    // Normal (non-arena, non-random) battleground types
+    constexpr BattlegroundTypeId BG_NORMAL_TYPES[] =
+    {
+        BATTLEGROUND_AV,
+        BATTLEGROUND_WS,
+        BATTLEGROUND_AB,
+        BATTLEGROUND_EY,
+        BATTLEGROUND_SA,
+        BATTLEGROUND_IC
+    };
+
+    // default for BgAutoQueue.BroadcastMessage config
     constexpr char const* BG_AUTO_QUEUE_DEFAULT_BROADCAST =
-        "BG Event starting in 2 minutes, you can opt-out by typing \".bgevents off\". "
-        "You can always join manually by pressing H and going to the BG tab";
+        "A Battleground event is starting shortly. Type .bgevents off to opt "
+        "out, or .bgevents on to opt back in. You can also join manually by "
+        "pressing H.";
 }
 
 BgAutoQueue* BgAutoQueue::instance()
@@ -31,33 +60,75 @@ BgAutoQueue* BgAutoQueue::instance()
 void BgAutoQueue::LoadConfig()
 {
     _enabled  = sConfigMgr->GetOption<bool>("BgAutoQueue.Enable", true);
-    _minLevel = sConfigMgr->GetOption<uint32>("BgAutoQueue.Level.Min", 10);
-    _maxLevel = sConfigMgr->GetOption<uint32>("BgAutoQueue.Level.Max", 80);
+    _levelMin = sConfigMgr->GetOption<uint32>("BgAutoQueue.Level.Min", 10);
+    _levelMax = sConfigMgr->GetOption<uint32>("BgAutoQueue.Level.Max", 79);
 
-    uint32 choice = sConfigMgr->GetOption<uint32>("BgAutoQueue.Battleground", BG_AUTO_QUEUE_WSG);
-    if (choice >= BG_AUTO_QUEUE_MAX)
+    if (_levelMin > _levelMax)
     {
-        LOG_WARN("module", "BgAutoQueue.Battleground has invalid value {}, defaulting to Warsong Gulch.", choice);
-        choice = BG_AUTO_QUEUE_WSG;
-    }
-    _defaultChoice = static_cast<BgAutoQueueChoice>(choice);
-
-    if (_minLevel > _maxLevel)
-    {
-        LOG_WARN("module", "BgAutoQueue level range is inverted ({} > {}), swapping.", _minLevel, _maxLevel);
-        std::swap(_minLevel, _maxLevel);
+        LOG_WARN("module", "BgAutoQueue level range is inverted ({} > {}), swapping.", _levelMin, _levelMax);
+        std::swap(_levelMin, _levelMax);
     }
 
-    uint32 minutes = sConfigMgr->GetOption<uint32>("BgAutoQueue.Interval", 45);
-    _intervalMs = minutes * 60u * 1000u;
-    _elapsedMs = 0;
+    _pool.clear();
+    std::string const poolStr = sConfigMgr->GetOption<std::string>("BgAutoQueue.Pool", "2,3,7");
+    for (std::string_view token : Acore::Tokenize(poolStr, ',', false))
+    {
+        Optional<uint32> value = Acore::StringTo<uint32>(token);
+        if (!value)
+        {
+            LOG_WARN("module", "BgAutoQueue.Pool entry '{}' is not a valid number, ignoring.", token);
+            continue;
+        }
+
+        BattlegroundTypeId bgTypeId = static_cast<BattlegroundTypeId>(*value);
+        if (bgTypeId == BATTLEGROUND_RB)
+        {
+            LOG_WARN("module", "BgAutoQueue.Pool entry {} is Random Battleground (unsupported), ignoring.", *value);
+            continue;
+        }
+
+        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+        if (!bgTemplate)
+        {
+            LOG_WARN("module", "BgAutoQueue.Pool entry {} has no battleground template, ignoring.", *value);
+            continue;
+        }
+
+        if (bgTemplate->isArena())
+        {
+            LOG_WARN("module", "BgAutoQueue.Pool entry {} is an arena (unsupported), ignoring.", *value);
+            continue;
+        }
+
+        _pool.push_back(bgTypeId);
+    }
+
+    if (_pool.empty())
+        LOG_WARN("module", "BgAutoQueue.Pool is empty; the random pick is disabled (only live-BG reinforcement can queue players).");
+
+    uint32 const intervalMin = sConfigMgr->GetOption<uint32>("BgAutoQueue.Interval", 45);
+    _intervalMs = intervalMin * 60u * 1000u;
+
+    uint32 const initialDelaySec = sConfigMgr->GetOption<uint32>("BgAutoQueue.InitialDelay", 0);
+    _initialDelayMs = initialDelaySec * 1000u;
+
+    uint32 const warningLeadSec = sConfigMgr->GetOption<uint32>("BgAutoQueue.WarningLeadTime", 60);
+    _warningLeadMs = warningLeadSec * 1000u;
+
+    if (_intervalMs > 0 && _warningLeadMs >= _intervalMs)
+        LOG_WARN("module", "BgAutoQueue.WarningLeadTime ({} s) >= Interval ({} min); the warning will not fire.", warningLeadSec, intervalMin);
+
+    _crossFaction     = sConfigMgr->GetOption<bool>("BgAutoQueue.CrossFaction", true);
+    _skipGameMasters  = sConfigMgr->GetOption<bool>("BgAutoQueue.SkipGameMasters", true);
+    _broadcastMessage = sConfigMgr->GetOption<std::string>("BgAutoQueue.BroadcastMessage", BG_AUTO_QUEUE_DEFAULT_BROADCAST);
+
+    // Reset timing on (re)load. Reload re-applies InitialDelay — accepted.
+    _elapsedMs   = 0;
     _warningSent = false;
+    _firstPass   = true;
 
-    _broadcastMessage = sConfigMgr->GetOption<std::string>("BgAutoQueue.BroadcastMessage",
-        BG_AUTO_QUEUE_DEFAULT_BROADCAST);
-
-    LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], choice={}, interval={} min ({} ms)",
-        _enabled, _minLevel, _maxLevel, static_cast<uint32>(_defaultChoice), minutes, _intervalMs);
+    LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}.",
+        _enabled, _levelMin, _levelMax, _pool.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters);
 }
 
 void BgAutoQueue::LoadOptOutData()
@@ -98,159 +169,306 @@ void BgAutoQueue::SetOptOut(ObjectGuid guid, bool optedOut)
     }
 }
 
+void BgAutoQueue::DeleteOptOut(CharacterDatabaseTransaction trans, uint32 guidLow)
+{
+    _optedOut.erase(guidLow);
+    trans->Append("DELETE FROM mod_bg_auto_queue_optout WHERE guid = {}", guidLow);
+}
+
 bool BgAutoQueue::IsLevelEligible(uint8 level) const
 {
-    return level >= _minLevel && level <= _maxLevel;
+    return level >= _levelMin && level <= _levelMax;
 }
 
-BattlegroundTypeId BgAutoQueue::ResolveBattlegroundFor(Player* player) const
+bool BgAutoQueue::IsEligible(Player* player) const
 {
-    if (!player)
-        return BATTLEGROUND_TYPE_NONE;
-
-    auto canEnter = [player](BattlegroundTypeId bgTypeId) -> bool
-    {
-        Battleground* bgt = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
-        if (!bgt)
-            return false;
-
-        if (!player->GetBGAccessByLevel(bgTypeId))
-            return false;
-
-        // The PvPDifficulty.dbc brackets are independent of the
-        // battleground_template MinLvl/MaxLvl columns. A BG without a
-        // bracket entry for the player's level cannot be queued — the
-        // queue handler will reject it with a null bracket. Treat such
-        // cases as ineligible so the WSG fallback can take over.
-        return GetBattlegroundBracketByLevel(bgt->GetMapId(), player->GetLevel()) != nullptr;
-    };
-
-    BattlegroundTypeId desired = BATTLEGROUND_WS;
-    switch (_defaultChoice)
-    {
-        case BG_AUTO_QUEUE_RANDOM: desired = BATTLEGROUND_RB; break;
-        case BG_AUTO_QUEUE_WSG:    desired = BATTLEGROUND_WS; break;
-        case BG_AUTO_QUEUE_AB:     desired = BATTLEGROUND_AB; break;
-        case BG_AUTO_QUEUE_EY:     desired = BATTLEGROUND_EY; break;
-        case BG_AUTO_QUEUE_AV:     desired = BATTLEGROUND_AV; break;
-        case BG_AUTO_QUEUE_SA:     desired = BATTLEGROUND_SA; break;
-        case BG_AUTO_QUEUE_IC:     desired = BATTLEGROUND_IC; break;
-        case BG_AUTO_QUEUE_MAX:    break;
-    }
-
-    if (canEnter(desired))
-        return desired;
-
-    // Fallback: Warsong Gulch is the lowest-level standard battleground.
-    if (desired != BATTLEGROUND_WS && canEnter(BATTLEGROUND_WS))
-        return BATTLEGROUND_WS;
-
-    return BATTLEGROUND_TYPE_NONE;
-}
-
-void BgAutoQueue::AutoQueuePlayer(Player* player) const
-{
-    if (!_enabled || !player)
-        return;
+    if (!player || !player->IsInWorld())
+        return false;
 
     std::string const& name = player->GetName();
 
     if (IsOptedOut(player->GetGUID()))
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: opted out.", name);
-        return;
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: opted out.", name);
+        return false;
     }
 
     if (!IsLevelEligible(player->GetLevel()))
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: level {} outside [{}-{}].",
-            name, player->GetLevel(), _minLevel, _maxLevel);
-        return;
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: level {} outside [{}-{}].", name, player->GetLevel(), _levelMin, _levelMax);
+        return false;
+    }
+
+    if (player->GetMap()->IsDungeon())
+    {
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: in a dungeon/raid.", name);
+        return false;
     }
 
     if (player->InBattleground())
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: already in a battleground.", name);
-        return;
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: already in a battleground.", name);
+        return false;
     }
 
-    if (player->InBattlegroundQueue())
+    if (player->InBattlegroundQueue() || !player->HasFreeBattlegroundQueueId())
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: already in a battleground/arena queue.", name);
-        return;
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: already queued or no free queue slot.", name);
+        return false;
     }
 
-    if (!player->HasFreeBattlegroundQueueId())
+    // Deserter check via any standard template (WSG).
+    if (Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(BATTLEGROUND_WS))
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: no free battleground queue slot.", name);
-        return;
+        if (!player->CanJoinToBattleground(bgTemplate))
+        {
+            LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: CanJoinToBattleground=false (deserter?).", name);
+            return false;
+        }
     }
 
-    BattlegroundTypeId bgTypeId = ResolveBattlegroundFor(player);
-    if (bgTypeId == BATTLEGROUND_TYPE_NONE)
+    // LFG: mirror the core BG join handler rule.
+    lfg::LfgState lfgState = sLFGMgr->GetState(player->GetGUID());
+    if (lfgState > lfg::LFG_STATE_NONE
+        && (lfgState != lfg::LFG_STATE_QUEUED || !sWorld->getBoolConfig(CONFIG_ALLOW_JOIN_BG_AND_LFG)))
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: no battleground available for level {} (choice={}).",
-            name, player->GetLevel(), static_cast<uint32>(_defaultChoice));
-        return;
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: using the LFG system.", name);
+        return false;
     }
+
+    // Death Knights still locked to Ebon Hold cannot be teleported to a BG yet.
+    if (player->IsClass(CLASS_DEATH_KNIGHT, CLASS_CONTEXT_TELEPORT)
+        && player->GetMapId() == MAP_EBON_HOLD
+        && !player->IsGameMaster()
+        && !player->HasSpell(50977))
+    {
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: Death Knight not yet allowed to leave Ebon Hold.", name);
+        return false;
+    }
+
+    if (_skipGameMasters && player->IsGameMaster())
+    {
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: game master.", name);
+        return false;
+    }
+
+    return true;
+}
+
+bool BgAutoQueue::CanEnter(Player* player, BattlegroundTypeId bgTypeId) const
+{
+    if (!player)
+        return false;
 
     Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
     if (!bgTemplate)
+        return false;
+
+    if (!player->GetBGAccessByLevel(bgTypeId))
+        return false;
+
+    // A BG without a PvP bracket entry for the player's level cannot be queued.
+    return GetBattlegroundBracketByLevel(bgTemplate->GetMapId(), player->GetLevel()) != nullptr;
+}
+
+bool BgAutoQueue::IsBracketEligible(BattlegroundTypeId bgTypeId, BracketBucket const& bucket) const
+{
+    for (ObjectGuid guid : bucket.players)
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: no template for bgTypeId {}.",
-            name, static_cast<uint32>(bgTypeId));
-        return;
+        Player* player = ObjectAccessor::FindPlayer(guid);
+        if (!player || !CanEnter(player, bgTypeId))
+            return false;
     }
 
-    PvPDifficultyEntry const* bracketEntry =
-        GetBattlegroundBracketByLevel(bgTemplate->GetMapId(), player->GetLevel());
-    if (!bracketEntry)
+    return true;
+}
+
+bool BgAutoQueue::IsViable(Battleground* bgTemplate, BracketBucket const& bucket) const
+{
+    uint32 const minPerTeam = bgTemplate->GetMinPlayersPerTeam();
+
+    if (_crossFaction)
+        return (bucket.alliance + bucket.horde) >= (2u * minPerTeam);
+
+    return bucket.alliance >= minPerTeam && bucket.horde >= minPerTeam;
+}
+
+BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracketId bracketId, BracketBucket const& bucket) const
+{
+    // (a) Live-BG reinforcement (priority; not limited to the pool).
+    std::vector<BattlegroundTypeId> liveTypes;
+    for (BattlegroundTypeId bgTypeId : BG_NORMAL_TYPES)
     {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: no PvP bracket for map {} level {}.",
-            name, bgTemplate->GetMapId(), player->GetLevel());
-        return;
+        if (sDisableMgr->IsDisabledFor(DISABLE_TYPE_BATTLEGROUND, bgTypeId, nullptr))
+            continue;
+
+        if (!IsBracketEligible(bgTypeId, bucket))
+            continue;
+
+        for (Battleground* bg : sBattlegroundMgr->GetBGFreeSlotQueueStore(bgTypeId))
+        {
+            if (bg->GetBracketId() != bracketId)
+                continue;
+
+            if (!(bg->GetStatus() > STATUS_WAIT_QUEUE && bg->GetStatus() < STATUS_WAIT_LEAVE))
+                continue;
+
+            if (!bg->HasFreeSlots())
+                continue;
+
+            liveTypes.push_back(bgTypeId);
+            break;
+        }
     }
+
+    if (!liveTypes.empty())
+        return Acore::Containers::SelectRandomContainerElement(liveTypes);
+
+    // (b) Random pick from the configured pool.
+    std::vector<BattlegroundTypeId> candidates;
+    for (BattlegroundTypeId bgTypeId : _pool)
+    {
+        if (sDisableMgr->IsDisabledFor(DISABLE_TYPE_BATTLEGROUND, bgTypeId, nullptr))
+            continue;
+
+        if (IsBracketEligible(bgTypeId, bucket))
+            candidates.push_back(bgTypeId);
+    }
+
+    if (candidates.empty())
+        return BATTLEGROUND_TYPE_NONE;
+
+    if (candidates.size() == 1)
+        return candidates.front();
+
+    std::vector<BattlegroundTypeId> viable;
+    for (BattlegroundTypeId bgTypeId : candidates)
+    {
+        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+        if (bgTemplate && IsViable(bgTemplate, bucket))
+            viable.push_back(bgTypeId);
+    }
+
+    if (!viable.empty())
+        return Acore::Containers::SelectRandomContainerElement(viable);
+
+    // None viable: pick the smallest by MinPlayersPerTeam (ties -> lowest id).
+    BattlegroundTypeId best = BATTLEGROUND_TYPE_NONE;
+    uint32 bestMin = std::numeric_limits<uint32>::max();
+    for (BattlegroundTypeId bgTypeId : candidates)
+    {
+        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+        if (!bgTemplate)
+            continue;
+
+        uint32 const minPerTeam = bgTemplate->GetMinPlayersPerTeam();
+        if (minPerTeam < bestMin || (minPerTeam == bestMin && bgTypeId < best))
+        {
+            bestMin = minPerTeam;
+            best = bgTypeId;
+        }
+    }
+
+    return best;
+}
+
+void BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket)
+{
+    Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+    if (!bgTemplate)
+        return;
 
     BattlegroundQueueTypeId bgQueueTypeId = BattlegroundMgr::BGQueueTypeId(bgTypeId, 0);
     if (bgQueueTypeId == BATTLEGROUND_QUEUE_NONE)
-    {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: no queue type id for bgTypeId {}.",
-            name, static_cast<uint32>(bgTypeId));
         return;
-    }
-
-    if (player->InBattlegroundQueueForBattlegroundQueueType(bgQueueTypeId))
-    {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: already queued for this BG type.", name);
-        return;
-    }
-
-    if (!player->CanJoinToBattleground(bgTemplate))
-    {
-        LOG_INFO("module", "mod-bg-auto-queue: skip {}: CanJoinToBattleground=false (deserter?).", name);
-        return;
-    }
-
-    LOG_INFO("module", "mod-bg-auto-queue: queuing {} into bgTypeId {}.",
-        name, static_cast<uint32>(bgTypeId));
 
     BattlegroundQueue& bgQueue = sBattlegroundMgr->GetBattlegroundQueue(bgQueueTypeId);
-    GroupQueueInfo* ginfo = bgQueue.AddGroup(player, nullptr, bgTypeId, bracketEntry, 0, false, false, 0, 0);
 
-    uint32 avgWaitTime = bgQueue.GetAverageQueueWaitTime(ginfo);
-    uint32 queueSlot = player->AddBattlegroundQueueId(bgQueueTypeId);
+    bool anyQueued = false;
+    BattlegroundBracketId scheduledBracket = BG_BRACKET_ID_FIRST;
 
-    if (WorldSession* session = player->GetSession())
+    for (ObjectGuid guid : bucket.players)
     {
-        WorldPacket data;
-        sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bgTemplate, queueSlot,
-            STATUS_WAIT_QUEUE, avgWaitTime, 0, 0, TEAM_NEUTRAL);
-        session->SendPacket(&data);
+        Player* player = ObjectAccessor::FindPlayer(guid);
+        if (!player)
+            continue;
+
+        // Re-validate: state may have changed since the bucket was gathered.
+        if (!IsEligible(player) || player->InBattlegroundQueueForBattlegroundQueueType(bgQueueTypeId))
+            continue;
+
+        // BG-specific veto (can only run at queue time).
+        GroupJoinBattlegroundResult err = ERR_BATTLEGROUND_NONE;
+        if (!sScriptMgr->OnPlayerCanJoinInBattlegroundQueue(player, ObjectGuid::Empty, bgTypeId, 0, err))
+        {
+            LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: OnPlayerCanJoinInBattlegroundQueue veto.", player->GetName());
+            continue;
+        }
+
+        PvPDifficultyEntry const* bracketEntry = GetBattlegroundBracketByLevel(bgTemplate->GetMapId(), player->GetLevel());
+        if (!bracketEntry)
+            continue;
+
+        GroupQueueInfo* ginfo = bgQueue.AddGroup(player, nullptr, bgTypeId, bracketEntry, 0, false, false, 0, 0);
+        uint32 avgWaitTime = bgQueue.GetAverageQueueWaitTime(ginfo);
+        uint32 queueSlot = player->AddBattlegroundQueueId(bgQueueTypeId);
+
+        if (WorldSession* session = player->GetSession())
+        {
+            WorldPacket data;
+            sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bgTemplate, queueSlot, STATUS_WAIT_QUEUE, avgWaitTime, 0, 0, TEAM_NEUTRAL);
+            session->SendPacket(&data);
+        }
+
+        sScriptMgr->OnPlayerJoinBG(player);
+
+        scheduledBracket = bracketEntry->GetBracketId();
+        anyQueued = true;
+
+        LOG_DEBUG("module", "mod-bg-auto-queue: queued {} into bgTypeId {}.", player->GetName(), static_cast<uint32>(bgTypeId));
     }
 
-    sScriptMgr->OnPlayerJoinBG(player);
+    // Schedule a single queue update for the bracket, not once per player.
+    if (anyQueued)
+        sBattlegroundMgr->ScheduleQueueUpdate(0, 0, bgQueueTypeId, bgTypeId, scheduledBracket);
+}
 
-    sBattlegroundMgr->ScheduleQueueUpdate(0, 0, bgQueueTypeId, bgTypeId, bracketEntry->GetBracketId());
+void BgAutoQueue::RunQueuePass()
+{
+    std::unordered_map<BattlegroundBracketId, BracketBucket> buckets;
+
+    for (auto const& [guid, player] : ObjectAccessor::GetPlayers())
+    {
+        if (!IsEligible(player))
+            continue;
+
+        PvPDifficultyEntry const* bracketEntry = GetBattlegroundBracketByLevel(BG_BRACKET_REFERENCE_MAP, player->GetLevel());
+        if (!bracketEntry)
+            continue;
+
+        BracketBucket& bucket = buckets[bracketEntry->GetBracketId()];
+        bucket.players.push_back(player->GetGUID());
+        if (player->GetTeamId() == TEAM_ALLIANCE)
+            ++bucket.alliance;
+        else
+            ++bucket.horde;
+    }
+
+    uint32 bracketsQueued = 0;
+    for (auto const& [bracketId, bucket] : buckets)
+    {
+        BattlegroundTypeId bgTypeId = SelectBattlegroundForBracket(bracketId, bucket);
+        if (bgTypeId == BATTLEGROUND_TYPE_NONE)
+        {
+            LOG_DEBUG("module", "mod-bg-auto-queue: bracket {} has no eligible battleground, skipping.", static_cast<uint32>(bracketId));
+            continue;
+        }
+
+        QueueBucket(bgTypeId, bucket);
+        ++bracketsQueued;
+    }
+
+    LOG_INFO("module", "mod-bg-auto-queue: queue pass processed {} bracket(s).", bracketsQueued);
 }
 
 void BgAutoQueue::Update(uint32 diff)
@@ -260,37 +478,30 @@ void BgAutoQueue::Update(uint32 diff)
 
     _elapsedMs += diff;
 
-    // Heads-up broadcast 2 minutes before the queue pass.
-    if (!_warningSent
-        && _intervalMs > BG_AUTO_QUEUE_WARNING_LEAD_MS
-        && _intervalMs - _elapsedMs <= BG_AUTO_QUEUE_WARNING_LEAD_MS)
+    uint32 const target = (_firstPass && _initialDelayMs > 0) ? _initialDelayMs : _intervalMs;
+
+    if (!_warningSent && target > _warningLeadMs && (target - _elapsedMs) <= _warningLeadMs)
     {
         BroadcastWarning();
         _warningSent = true;
     }
 
-    if (_elapsedMs < _intervalMs)
-        return;
-
-    _elapsedMs = 0;
-    _warningSent = false;
-
-    auto const& players = ObjectAccessor::GetPlayers();
-    LOG_INFO("module", "mod-bg-auto-queue: interval elapsed, scanning {} player(s).", players.size());
-
-    uint32 queued = 0;
-    for (auto const& [guid, player] : players)
+    if (_elapsedMs >= target)
     {
-        if (!player || !player->IsInWorld())
-            continue;
-
-        bool wasInQueue = player->InBattlegroundQueue();
-        AutoQueuePlayer(player);
-        if (!wasInQueue && player->InBattlegroundQueue())
-            ++queued;
+        RunQueuePass();
+        _elapsedMs = 0;
+        _warningSent = false;
+        _firstPass = false;
     }
+}
 
-    LOG_INFO("module", "mod-bg-auto-queue: queued {} player(s) this pass.", queued);
+uint32 BgAutoQueue::GetTimeUntilNextPass() const
+{
+    if (!_enabled || _intervalMs == 0)
+        return 0;
+
+    uint32 const target = (_firstPass && _initialDelayMs > 0) ? _initialDelayMs : _intervalMs;
+    return target > _elapsedMs ? (target - _elapsedMs) : 0;
 }
 
 void BgAutoQueue::BroadcastWarning() const
@@ -301,18 +512,16 @@ void BgAutoQueue::BroadcastWarning() const
     uint32 sent = 0;
     for (auto const& [guid, player] : ObjectAccessor::GetPlayers())
     {
-        if (!player || !player->IsInWorld())
+        if (!IsEligible(player))
             continue;
 
-        if (IsOptedOut(player->GetGUID()))
+        WorldSession* session = player->GetSession();
+        if (!session)
             continue;
 
-        if (!IsLevelEligible(player->GetLevel()))
-            continue;
-
-        ChatHandler(player->GetSession()).SendSysMessage(_broadcastMessage);
+        ChatHandler(session).SendSysMessage(_broadcastMessage);
         ++sent;
     }
 
-    LOG_INFO("module", "mod-bg-auto-queue: broadcast warning sent to {} player(s).", sent);
+    LOG_DEBUG("module", "mod-bg-auto-queue: broadcast warning sent to {} player(s).", sent);
 }

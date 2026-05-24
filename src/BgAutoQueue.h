@@ -1,28 +1,23 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license
+ */
+
 #ifndef _MOD_BG_AUTO_QUEUE_H_
 #define _MOD_BG_AUTO_QUEUE_H_
 
-#include "Define.h"
+#include "DBCEnums.h"
+#include "DatabaseEnvFwd.h"
 #include "ObjectGuid.h"
 #include "SharedDefines.h"
 
 #include <string>
 #include <unordered_set>
+#include <vector>
 
+class Battleground;
 class Player;
 
-enum BgAutoQueueChoice : uint8
-{
-    BG_AUTO_QUEUE_RANDOM = 0,
-    BG_AUTO_QUEUE_WSG    = 1,
-    BG_AUTO_QUEUE_AB     = 2,
-    BG_AUTO_QUEUE_EY     = 3,
-    BG_AUTO_QUEUE_AV     = 4,
-    BG_AUTO_QUEUE_SA     = 5,
-    BG_AUTO_QUEUE_IC     = 6,
-    BG_AUTO_QUEUE_MAX
-};
-
-class AC_GAME_API BgAutoQueue
+class BgAutoQueue
 {
 public:
     static BgAutoQueue* instance();
@@ -31,42 +26,79 @@ public:
     void LoadOptOutData();
 
     bool IsEnabled() const { return _enabled; }
-    uint32 GetMinLevel() const { return _minLevel; }
-    uint32 GetMaxLevel() const { return _maxLevel; }
-    BgAutoQueueChoice GetDefaultChoice() const { return _defaultChoice; }
-    uint32 GetIntervalMs() const { return _intervalMs; }
 
     bool IsOptedOut(ObjectGuid guid) const;
     void SetOptOut(ObjectGuid guid, bool optedOut);
+    // Called from PlayerScript::OnPlayerDeleteFromDB. The DELETE is appended to
+    // the character-deletion transaction so it commits atomically with it.
+    void DeleteOptOut(CharacterDatabaseTransaction trans, uint32 guidLow);
 
     bool IsLevelEligible(uint8 level) const;
 
-    // Pick the queue target for a player given the configured default,
-    // falling back to Warsong Gulch when the chosen battleground is not
-    // available for the player's level.
-    BattlegroundTypeId ResolveBattlegroundFor(Player* player) const;
-
-    // Auto-queue the player into the resolved battleground. Safe to call
-    // for players that are already queued or otherwise ineligible — those
-    // cases are silently skipped.
-    void AutoQueuePlayer(Player* player) const;
+    // Runs a single per-bracket queue pass. Does NOT check _enabled — it is
+    // invoked both by the periodic Update (enabled path) and by .bgevents run
+    // (always), so the Enable/Interval gate lives only in Update.
+    void RunQueuePass();
 
     // Drives the periodic queue pass. Call from WorldScript::OnUpdate.
     void Update(uint32 diff);
 
+    // Milliseconds until the next automatic pass (0 when no pass is scheduled).
+    uint32 GetTimeUntilNextPass() const;
+
 private:
     BgAutoQueue() = default;
+
+    // Per-bracket bucket of eligible players gathered during a pass. Players
+    // are stored by GUID and re-resolved at queue time (never store a
+    // long-lived Player*).
+    struct BracketBucket
+    {
+        std::vector<ObjectGuid> players;
+        uint32 alliance = 0;
+        uint32 horde = 0;
+    };
+
+    // Shared per-player eligibility used by both the queue pass and the
+    // warning broadcast. Excludes the BG-specific OnPlayerCanJoinInBattleground
+    // Queue veto (that runs only at queue time).
+    bool IsEligible(Player* player) const;
+
+    // True when the player can be queued into bgTypeId at their level.
+    bool CanEnter(Player* player, BattlegroundTypeId bgTypeId) const;
+
+    // True when every player in the bucket passes CanEnter for bgTypeId.
+    bool IsBracketEligible(BattlegroundTypeId bgTypeId, BracketBucket const& bucket) const;
+
+    // Viability per CrossFaction: cross-faction => total >= 2*min; otherwise
+    // each faction tally >= min.
+    bool IsViable(Battleground* bgTemplate, BracketBucket const& bucket) const;
+
+    // Selects the BG for a populated bracket: live-BG reinforcement first,
+    // then a random pick from the configured pool with documented fallbacks.
+    BattlegroundTypeId SelectBattlegroundForBracket(BattlegroundBracketId bracketId,
+        BracketBucket const& bucket) const;
+
+    // Queues every player in the bucket into bgTypeId, then schedules a single
+    // queue update for the bracket.
+    void QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket);
 
     void BroadcastWarning() const;
 
     bool _enabled = true;
-    uint32 _minLevel = 10;
-    uint32 _maxLevel = 80;
-    BgAutoQueueChoice _defaultChoice = BG_AUTO_QUEUE_WSG;
-    uint32 _intervalMs = 45 * 60 * 1000;
-    uint32 _elapsedMs = 0;
+    uint32 _levelMin = 10;
+    uint32 _levelMax = 79;
+    std::vector<BattlegroundTypeId> _pool;
+    uint32 _intervalMs = 45u * 60u * 1000u;
+    uint32 _initialDelayMs = 0;
+    uint32 _warningLeadMs = 60u * 1000u;
+    bool _crossFaction = true;
+    bool _skipGameMasters = true;
     std::string _broadcastMessage;
+
+    uint32 _elapsedMs = 0;
     bool _warningSent = false;
+    bool _firstPass = true;
 
     std::unordered_set<uint32> _optedOut; // characters guid::low values
 };

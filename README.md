@@ -69,11 +69,13 @@ Things to be aware of when running this on a live server:
   `Interval`, the next automatic pass is pushed back each time and may never
   fire — use `.bgevents run` to trigger one on demand, or avoid reloading
   right before a pass is due.
-- **Opt-out state is read once at startup.** The opt-out set is loaded from
-  `mod_bg_auto_queue_optout` on server startup and is thereafter the in-memory
-  source of truth (mutated by `.bgevents on`/`off` and kept in sync with the
-  table). Editing the table directly while the server is running has **no
-  effect until the next restart**.
+- **Opt-out is stored per character via the core PlayerSettings system**
+  (`source = "mod-bg-auto-queue"`, index 0; `1` = opted out). The core loads it
+  on login, saves it on logout, and deletes it when the character is deleted —
+  the module keeps no table of its own. **This requires the core config
+  `EnablePlayerSettings = 1` for the opt-out to persist across logins.** With it
+  `0` (the core default), `.bgevents off` still works but only for the current
+  session, and a warning is logged at startup.
 
 ## Installation
 
@@ -81,8 +83,9 @@ Things to be aware of when running this on a live server:
 2. Re-run CMake and rebuild the worldserver.
 3. Copy `mod-bg-auto-queue.conf.dist` to `mod-bg-auto-queue.conf` in your
    worldserver's configuration directory and adjust as needed.
-4. The module installs its characters-database table automatically through the
-   AzerothCore SQL updater on first run.
+4. For per-character opt-out to persist across logins, set the core config
+   `EnablePlayerSettings = 1` (see the dependency note in the conf). The module
+   creates no database tables of its own.
 
 ## Configuration
 
@@ -102,5 +105,5 @@ All options are documented in `conf/mod-bg-auto-queue.conf.dist`:
 
 - `.bgevents on` — opt the current character back into battleground events.
 - `.bgevents off` — opt the current character out (future passes only; does not dequeue an existing queue).
-- `.bgevents status` — show the opt-in state and the time until the next scheduled pass.
+- `.bgevents` — *(no argument)* show the opt-in state and the time until the next scheduled pass.
 - `.bgevents run` — *(GM, console-capable)* run a queue pass immediately, even when the automatic schedule is disabled. Does not reset the periodic timer.

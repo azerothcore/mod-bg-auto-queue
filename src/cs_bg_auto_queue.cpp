@@ -20,10 +20,8 @@ public:
     {
         static ChatCommandTable bgAutoQueueTable =
         {
-            { "on",     HandleBgAutoQueueOnCommand,     SEC_PLAYER,        Console::No  },
-            { "off",    HandleBgAutoQueueOffCommand,    SEC_PLAYER,        Console::No  },
-            { "status", HandleBgAutoQueueStatusCommand, SEC_PLAYER,        Console::No  },
-            { "run",    HandleBgAutoQueueRunCommand,    SEC_GAMEMASTER,    Console::Yes },
+            { "run", HandleBgAutoQueueRunCommand, SEC_GAMEMASTER, Console::Yes },
+            { "",    HandleBgAutoQueueCommand,    SEC_PLAYER,     Console::No  },
         };
 
         static ChatCommandTable commandTable =
@@ -34,7 +32,9 @@ public:
         return commandTable;
     }
 
-    static bool HandleBgAutoQueueOnCommand(ChatHandler* handler)
+    // Default subcommand: `.bgevents on`/`off` toggles opt state; `.bgevents`
+    // with no argument prints the current state and time to the next event.
+    static bool HandleBgAutoQueueCommand(ChatHandler* handler, Optional<bool> enable)
     {
         Player* player = handler->GetPlayer();
         if (!player)
@@ -43,35 +43,20 @@ public:
             return false;
         }
 
-        sBgAutoQueue->SetOptOut(player->GetGUID(), false);
-        handler->SendSysMessage("Battleground events enabled for your character.");
-        return true;
-    }
-
-    static bool HandleBgAutoQueueOffCommand(ChatHandler* handler)
-    {
-        Player* player = handler->GetPlayer();
-        if (!player)
+        if (enable.has_value())
         {
-            handler->SendErrorMessage("This command must be used in-game.");
-            return false;
+            // enable == true means opt IN, i.e. not opted out.
+            sBgAutoQueue->SetOptOut(player, !*enable);
+
+            if (*enable)
+                handler->SendSysMessage("Battleground events enabled for your character.");
+            else
+                handler->SendSysMessage("Battleground events disabled for your character. You will not be auto-queued. Use .bgevents on to opt back in.");
+
+            return true;
         }
 
-        sBgAutoQueue->SetOptOut(player->GetGUID(), true);
-        handler->SendSysMessage("Battleground events disabled for your character. You will not be auto-queued. Use .bgevents on to opt back in.");
-        return true;
-    }
-
-    static bool HandleBgAutoQueueStatusCommand(ChatHandler* handler)
-    {
-        Player* player = handler->GetPlayer();
-        if (!player)
-        {
-            handler->SendErrorMessage("This command must be used in-game.");
-            return false;
-        }
-
-        if (sBgAutoQueue->IsOptedOut(player->GetGUID()))
+        if (sBgAutoQueue->IsOptedOut(player))
             handler->SendSysMessage("Battleground events are currently DISABLED for your character.");
         else
             handler->SendSysMessage("Battleground events are currently ENABLED for your character.");

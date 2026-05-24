@@ -7,6 +7,12 @@
 ###################################################################################################
 # mod-bg-auto-queue
 #
+#    DEPENDENCY: per-character ".bgevents" opt-out is stored via the core
+#    PlayerSettings system, which only persists across logins when the core
+#    config "EnablePlayerSettings" is set to 1. With it 0 (the core default),
+#    ".bgevents off" still works but lasts only for the current session, and a
+#    warning is logged at startup. This module does not change the core config.
+#
 #    BgAutoQueue.Enable
 #        Description: Enable the automatic, periodic battleground queue pass.
 #                     When enabled, the module periodically gathers eligible

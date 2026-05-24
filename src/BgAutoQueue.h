@@ -6,16 +6,20 @@
 #define _MOD_BG_AUTO_QUEUE_H_
 
 #include "DBCEnums.h"
-#include "DatabaseEnvFwd.h"
 #include "ObjectGuid.h"
 #include "SharedDefines.h"
 
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 class Battleground;
 class Player;
+
+// PlayerSettings layout for this module. source = "mod-bg-auto-queue".
+enum BgAutoQueueSetting
+{
+    BG_AUTO_QUEUE_SETTING_OPT_OUT = 0 // value: 0 = opted in (default), 1 = opted out
+};
 
 class BgAutoQueue
 {
@@ -23,15 +27,13 @@ public:
     static BgAutoQueue* instance();
 
     void LoadConfig();
-    void LoadOptOutData();
 
     bool IsEnabled() const { return _enabled; }
 
-    bool IsOptedOut(ObjectGuid guid) const;
-    void SetOptOut(ObjectGuid guid, bool optedOut);
-    // Called from PlayerScript::OnPlayerDeleteFromDB. The DELETE is appended to
-    // the character-deletion transaction so it commits atomically with it.
-    void DeleteOptOut(CharacterDatabaseTransaction trans, uint32 guidLow);
+    // Opt-out is stored as a per-character core PlayerSetting; these are thin
+    // wrappers over Player::GetPlayerSetting/UpdatePlayerSetting.
+    bool IsOptedOut(Player* player) const;
+    void SetOptOut(Player* player, bool optedOut);
 
     bool IsLevelEligible(uint8 level) const;
 
@@ -99,8 +101,6 @@ private:
     uint32 _elapsedMs = 0;
     bool _warningSent = false;
     bool _firstPass = true;
-
-    std::unordered_set<uint32> _optedOut; // characters guid::low values
 };
 
 #define sBgAutoQueue BgAutoQueue::instance()

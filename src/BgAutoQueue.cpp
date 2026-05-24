@@ -12,7 +12,6 @@
 #include "Config.h"
 #include "Containers.h"
 #include "DBCStores.h"
-#include "DatabaseEnv.h"
 #include "DisableMgr.h"
 #include "LFGMgr.h"
 #include "Log.h"
@@ -129,50 +128,26 @@ void BgAutoQueue::LoadConfig()
 
     LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}.",
         _enabled, _levelMin, _levelMax, _pool.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters);
+
+    // Opt-out is stored via the core PlayerSettings system, which only persists
+    // across logins when EnablePlayerSettings is on. Without it, .bgevents
+    // opt-out still works but only for the current session.
+    if (!sWorld->getBoolConfig(CONFIG_PLAYER_SETTINGS_ENABLED))
+        LOG_WARN("module", "mod-bg-auto-queue: EnablePlayerSettings is 0; "
+            ".bgevents opt-out works only for the current session and will not "
+            "persist across logins until an administrator sets EnablePlayerSettings = 1.");
 }
 
-void BgAutoQueue::LoadOptOutData()
+bool BgAutoQueue::IsOptedOut(Player* player) const
 {
-    _optedOut.clear();
-
-    QueryResult result = CharacterDatabase.Query("SELECT guid FROM mod_bg_auto_queue_optout");
-    if (!result)
-        return;
-
-    do
-    {
-        Field* fields = result->Fetch();
-        _optedOut.insert(fields[0].Get<uint32>());
-    } while (result->NextRow());
-
-    LOG_INFO("module", "mod-bg-auto-queue: loaded {} opt-out entries.", _optedOut.size());
+    // GetPlayerSetting is non-const (it lazily creates a zero-default entry),
+    // but the constness here is on BgAutoQueue, not on the Player* argument.
+    return player->GetPlayerSetting("mod-bg-auto-queue", BG_AUTO_QUEUE_SETTING_OPT_OUT).IsEnabled();
 }
 
-bool BgAutoQueue::IsOptedOut(ObjectGuid guid) const
+void BgAutoQueue::SetOptOut(Player* player, bool optedOut)
 {
-    return _optedOut.find(guid.GetCounter()) != _optedOut.end();
-}
-
-void BgAutoQueue::SetOptOut(ObjectGuid guid, bool optedOut)
-{
-    uint32 low = guid.GetCounter();
-
-    if (optedOut)
-    {
-        if (_optedOut.insert(low).second)
-            CharacterDatabase.Execute("INSERT IGNORE INTO mod_bg_auto_queue_optout (guid) VALUES ({})", low);
-    }
-    else
-    {
-        if (_optedOut.erase(low) > 0)
-            CharacterDatabase.Execute("DELETE FROM mod_bg_auto_queue_optout WHERE guid = {}", low);
-    }
-}
-
-void BgAutoQueue::DeleteOptOut(CharacterDatabaseTransaction trans, uint32 guidLow)
-{
-    _optedOut.erase(guidLow);
-    trans->Append("DELETE FROM mod_bg_auto_queue_optout WHERE guid = {}", guidLow);
+    player->UpdatePlayerSetting("mod-bg-auto-queue", BG_AUTO_QUEUE_SETTING_OPT_OUT, optedOut ? 1u : 0u);
 }
 
 bool BgAutoQueue::IsLevelEligible(uint8 level) const
@@ -187,7 +162,7 @@ bool BgAutoQueue::IsEligible(Player* player) const
 
     std::string const& name = player->GetName();
 
-    if (IsOptedOut(player->GetGUID()))
+    if (IsOptedOut(player))
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: opted out.", name);
         return false;

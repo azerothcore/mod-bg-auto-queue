@@ -6,6 +6,7 @@
 #define _MOD_BG_AUTO_QUEUE_H_
 
 #include "DBCEnums.h"
+#include "DatabaseEnvFwd.h"
 #include "ObjectGuid.h"
 #include "SharedDefines.h"
 
@@ -28,8 +29,9 @@ public:
 
     bool IsOptedOut(ObjectGuid guid) const;
     void SetOptOut(ObjectGuid guid, bool optedOut);
-    // Called from PlayerScript::OnPlayerDeleteFromDB with a GUID-low.
-    void DeleteOptOut(uint32 guidLow);
+    // Called from PlayerScript::OnPlayerDeleteFromDB. The DELETE is appended to
+    // the character-deletion transaction so it commits atomically with it.
+    void DeleteOptOut(CharacterDatabaseTransaction trans, uint32 guidLow);
 
     bool IsLevelEligible(uint8 level) const;
 
@@ -89,7 +91,7 @@ private:
     std::vector<BattlegroundTypeId> _pool;
     uint32 _intervalMs = 45u * 60u * 1000u;
     uint32 _initialDelayMs = 0;
-    uint32 _warningLeadMs = 120u * 1000u;
+    uint32 _warningLeadMs = 60u * 1000u;
     bool _crossFaction = true;
     bool _skipGameMasters = true;
     std::string _broadcastMessage;

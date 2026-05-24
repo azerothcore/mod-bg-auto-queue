@@ -52,6 +52,29 @@ battleground, not already in a battleground/arena queue, not a deserter, not
 using the LFG system, not a Death Knight still locked to Ebon Hold, and (when
 `SkipGameMasters` is on) not a game master.
 
+## Operational notes
+
+Things to be aware of when running this on a live server:
+
+- **A pass queues everyone in one tick (burst).** All eligible players are
+  queued during a single world update, and a `OnPlayerJoinBG` script hook fires
+  **once per queued player**. On a high-population server this is a noticeable
+  burst: any other module that listens on `OnPlayerJoinBG` (announcers, reward
+  systems, statistics) will fire en masse, and the core BG queue announcer in
+  immediate mode emits one line per player (see "Queue announcer" above —
+  prefer its timed / player-only mode). Spreading the burst across multiple
+  ticks is intentionally not implemented; size your `Interval` accordingly.
+- **`.reload config` restarts the timer.** Every config reload resets the
+  interval and re-applies `InitialDelay`. If you reload more frequently than
+  `Interval`, the next automatic pass is pushed back each time and may never
+  fire — use `.bgevents run` to trigger one on demand, or avoid reloading
+  right before a pass is due.
+- **Opt-out state is read once at startup.** The opt-out set is loaded from
+  `mod_bg_auto_queue_optout` on server startup and is thereafter the in-memory
+  source of truth (mutated by `.bgevents on`/`off` and kept in sync with the
+  table). Editing the table directly while the server is running has **no
+  effect until the next restart**.
+
 ## Installation
 
 1. Clone this folder into `modules/mod-bg-auto-queue/` of your AzerothCore source.

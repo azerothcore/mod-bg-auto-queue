@@ -14,10 +14,11 @@ public:
     }) { }
 
     // guid is the character GUID-low; drop any opt-out row so the table does
-    // not accumulate orphans when a character is deleted.
-    void OnPlayerDeleteFromDB(CharacterDatabaseTransaction /*trans*/, uint32 guid) override
+    // not accumulate orphans when a character is deleted. The DELETE joins the
+    // character-deletion transaction so it commits atomically with it.
+    void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
     {
-        sBgAutoQueue->DeleteOptOut(guid);
+        sBgAutoQueue->DeleteOptOut(trans, guid);
     }
 };
 

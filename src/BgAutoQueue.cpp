@@ -112,7 +112,7 @@ void BgAutoQueue::LoadConfig()
     uint32 const initialDelaySec = sConfigMgr->GetOption<uint32>("BgAutoQueue.InitialDelay", 0);
     _initialDelayMs = initialDelaySec * 1000u;
 
-    uint32 const warningLeadSec = sConfigMgr->GetOption<uint32>("BgAutoQueue.WarningLeadTime", 120);
+    uint32 const warningLeadSec = sConfigMgr->GetOption<uint32>("BgAutoQueue.WarningLeadTime", 60);
     _warningLeadMs = warningLeadSec * 1000u;
 
     if (_intervalMs > 0 && _warningLeadMs >= _intervalMs)
@@ -169,10 +169,10 @@ void BgAutoQueue::SetOptOut(ObjectGuid guid, bool optedOut)
     }
 }
 
-void BgAutoQueue::DeleteOptOut(uint32 guidLow)
+void BgAutoQueue::DeleteOptOut(CharacterDatabaseTransaction trans, uint32 guidLow)
 {
     _optedOut.erase(guidLow);
-    CharacterDatabase.Execute("DELETE FROM mod_bg_auto_queue_optout WHERE guid = {}", guidLow);
+    trans->Append("DELETE FROM mod_bg_auto_queue_optout WHERE guid = {}", guidLow);
 }
 
 bool BgAutoQueue::IsLevelEligible(uint8 level) const

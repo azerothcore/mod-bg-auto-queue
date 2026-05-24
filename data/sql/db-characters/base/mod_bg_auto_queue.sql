@@ -1,6 +1,5 @@
 --
--- Table tracking characters that opted out from the automatic battleground
--- queue performed by mod-bg-auto-queue.
+-- Table tracking characters that opted out from the automatic battleground queue performed by mod-bg-auto-queue
 --
 CREATE TABLE IF NOT EXISTS `mod_bg_auto_queue_optout` (
     `guid` INT UNSIGNED NOT NULL,

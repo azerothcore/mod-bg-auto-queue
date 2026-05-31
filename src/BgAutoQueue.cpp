@@ -69,7 +69,9 @@ void BgAutoQueue::LoadConfig()
         std::swap(_levelMin, _levelMax);
     }
 
-    _pool.clear();
+    // Only parse the type ids here; battleground templates do not exist yet at
+    // config-load time, so template/arena validation is left to ResolvePool.
+    _poolRaw.clear();
     std::string const poolStr = sConfigMgr->GetOption<std::string>("BgAutoQueue.Pool", "2,3,7");
     for (std::string_view token : Acore::Tokenize(poolStr, ',', false))
     {
@@ -87,23 +89,10 @@ void BgAutoQueue::LoadConfig()
             continue;
         }
 
-        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
-        if (!bgTemplate)
-        {
-            LOG_WARN("module", "BgAutoQueue.Pool entry {} has no battleground template, ignoring.", *value);
-            continue;
-        }
-
-        if (bgTemplate->isArena())
-        {
-            LOG_WARN("module", "BgAutoQueue.Pool entry {} is an arena (unsupported), ignoring.", *value);
-            continue;
-        }
-
-        _pool.push_back(bgTypeId);
+        _poolRaw.push_back(bgTypeId);
     }
 
-    if (_pool.empty())
+    if (_poolRaw.empty())
         LOG_WARN("module", "BgAutoQueue.Pool is empty; the random pick is disabled (only live-BG reinforcement can queue players).");
 
     uint32 const intervalMin = sConfigMgr->GetOption<uint32>("BgAutoQueue.Interval", 45);
@@ -128,7 +117,7 @@ void BgAutoQueue::LoadConfig()
     _firstPass   = true;
 
     LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}.",
-        _enabled, _levelMin, _levelMax, _pool.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters);
+        _enabled, _levelMin, _levelMax, _poolRaw.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters);
 
     // Opt-out is stored via the core PlayerSettings system, which only persists
     // across logins when EnablePlayerSettings is on. Without it, .bgevents
@@ -137,6 +126,31 @@ void BgAutoQueue::LoadConfig()
         LOG_WARN("module", "mod-bg-auto-queue: EnablePlayerSettings is 0; "
             ".bgevents opt-out works only for the current session and will not "
             "persist across logins until an administrator sets EnablePlayerSettings = 1.");
+}
+
+void BgAutoQueue::ResolvePool()
+{
+    _pool.clear();
+    for (BattlegroundTypeId bgTypeId : _poolRaw)
+    {
+        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+        if (!bgTemplate)
+        {
+            LOG_DEBUG("module", "BgAutoQueue.Pool entry {} has no battleground template, ignoring.", static_cast<uint32>(bgTypeId));
+            continue;
+        }
+
+        if (bgTemplate->isArena())
+        {
+            LOG_DEBUG("module", "BgAutoQueue.Pool entry {} is an arena (unsupported), ignoring.", static_cast<uint32>(bgTypeId));
+            continue;
+        }
+
+        _pool.push_back(bgTypeId);
+    }
+
+    if (_pool.empty() && !_poolRaw.empty())
+        LOG_DEBUG("module", "BgAutoQueue.Pool has no usable battlegrounds against the current templates; the random pick is disabled.");
 }
 
 bool BgAutoQueue::IsOptedOut(Player* player) const
@@ -449,6 +463,10 @@ uint32 BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const
 
 BgAutoQueue::QueuePassResult BgAutoQueue::RunQueuePass()
 {
+    // Rebuild the pool against the templates that exist right now, so every
+    // pass (periodic or .bgevents run) reflects the current battlegrounds.
+    ResolvePool();
+
     std::unordered_map<BattlegroundBracketId, BracketBucket> buckets;
 
     QueuePassResult result;

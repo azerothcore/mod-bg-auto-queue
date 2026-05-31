@@ -137,10 +137,17 @@ private:
 
     void BroadcastWarning() const;
 
+    // Rebuilds _pool from the configured _poolRaw against the battleground
+    // templates that exist right now. Called at the start of every pass so a
+    // pass always reflects the current templates (templates are not yet loaded
+    // at config-load time, and may change on .reload). Cheap: _poolRaw is tiny.
+    void ResolvePool();
+
     bool _enabled = true;
     uint32 _levelMin = 10;
     uint32 _levelMax = 79;
-    std::vector<BattlegroundTypeId> _pool;
+    std::vector<BattlegroundTypeId> _poolRaw; // type ids parsed from config, unvalidated
+    std::vector<BattlegroundTypeId> _pool;    // _poolRaw filtered to usable templates
     uint32 _intervalMs = 45u * 60u * 1000u;
     uint32 _initialDelayMs = 0;
     uint32 _warningLeadMs = 60u * 1000u;

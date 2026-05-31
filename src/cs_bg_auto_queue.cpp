@@ -73,8 +73,24 @@ public:
     static bool HandleBgAutoQueueRunCommand(ChatHandler* handler)
     {
         // Fires an immediate queue pass regardless of Enable/Interval without touching the periodic timer
-        sBgAutoQueue->RunQueuePass();
-        handler->SendSysMessage("Battleground event queue pass executed.");
+        BgAutoQueue::QueuePassResult result = sBgAutoQueue->RunQueuePass();
+
+        if (result.players == 0)
+        {
+            handler->SendSysMessage("Battleground event: no eligible players were queued.");
+            return true;
+        }
+
+        handler->SendSysMessage("Battleground event queued players:");
+        for (BgAutoQueue::QueuePassResult::BracketCount const& bracket : result.brackets)
+        {
+            if (bracket.minLevel == bracket.maxLevel)
+                handler->PSendSysMessage("  {}: {} player(s)", bracket.minLevel, bracket.players);
+            else
+                handler->PSendSysMessage("  {}-{}: {} player(s)", bracket.minLevel, bracket.maxLevel, bracket.players);
+        }
+
+        handler->PSendSysMessage("Queued {} player(s) in total", result.players);
         return true;
     }
 };

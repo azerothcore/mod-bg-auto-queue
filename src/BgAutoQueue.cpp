@@ -24,6 +24,7 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+#include <algorithm>
 #include <limits>
 #include <unordered_map>
 
@@ -347,19 +348,19 @@ BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracket
     return best;
 }
 
-void BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket)
+uint32 BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket)
 {
     Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
     if (!bgTemplate)
-        return;
+        return 0;
 
     BattlegroundQueueTypeId bgQueueTypeId = BattlegroundMgr::BGQueueTypeId(bgTypeId, 0);
     if (bgQueueTypeId == BATTLEGROUND_QUEUE_NONE)
-        return;
+        return 0;
 
     BattlegroundQueue& bgQueue = sBattlegroundMgr->GetBattlegroundQueue(bgQueueTypeId);
 
-    bool anyQueued = false;
+    uint32 queued = 0;
     BattlegroundBracketId scheduledBracket = BG_BRACKET_ID_FIRST;
 
     for (ObjectGuid guid : bucket.players)
@@ -398,17 +399,19 @@ void BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& 
         sScriptMgr->OnPlayerJoinBG(player);
 
         scheduledBracket = bracketEntry->GetBracketId();
-        anyQueued = true;
+        ++queued;
 
         LOG_DEBUG("module", "mod-bg-auto-queue: queued {} into bgTypeId {}.", player->GetName(), static_cast<uint32>(bgTypeId));
     }
 
     // Schedule a single queue update for the bracket, not once per player.
-    if (anyQueued)
+    if (queued > 0)
         sBattlegroundMgr->ScheduleQueueUpdate(0, 0, bgQueueTypeId, bgTypeId, scheduledBracket);
+
+    return queued;
 }
 
-void BgAutoQueue::RunQueuePass()
+BgAutoQueue::QueuePassResult BgAutoQueue::RunQueuePass()
 {
     std::unordered_map<BattlegroundBracketId, BracketBucket> buckets;
 
@@ -422,6 +425,8 @@ void BgAutoQueue::RunQueuePass()
             continue;
 
         BracketBucket& bucket = buckets[bracketEntry->GetBracketId()];
+        bucket.minLevel = bracketEntry->minLevel;
+        bucket.maxLevel = bracketEntry->maxLevel;
         bucket.players.push_back(player->GetGUID());
         if (player->GetTeamId() == TEAM_ALLIANCE)
             ++bucket.alliance;
@@ -429,7 +434,7 @@ void BgAutoQueue::RunQueuePass()
             ++bucket.horde;
     }
 
-    uint32 bracketsQueued = 0;
+    QueuePassResult result;
     for (auto const& [bracketId, bucket] : buckets)
     {
         BattlegroundTypeId bgTypeId = SelectBattlegroundForBracket(bracketId, bucket);
@@ -439,11 +444,25 @@ void BgAutoQueue::RunQueuePass()
             continue;
         }
 
-        QueueBucket(bgTypeId, bucket);
-        ++bracketsQueued;
+        uint32 const queued = QueueBucket(bgTypeId, bucket);
+        if (queued > 0)
+        {
+            result.players += queued;
+            result.brackets.push_back({ bucket.minLevel, bucket.maxLevel, queued });
+        }
     }
 
-    LOG_INFO("module", "mod-bg-auto-queue: queue pass processed {} bracket(s).", bracketsQueued);
+    std::sort(result.brackets.begin(), result.brackets.end(),
+        [](QueuePassResult::BracketCount const& a, QueuePassResult::BracketCount const& b)
+        {
+            return a.minLevel < b.minLevel;
+        });
+
+    LOG_INFO("module", "mod-bg-auto-queue: queue pass queued {} player(s) across {} bracket(s).", result.players, result.brackets.size());
+    for (QueuePassResult::BracketCount const& bracket : result.brackets)
+        LOG_INFO("module", "mod-bg-auto-queue:   bracket {}-{}: {} player(s).", bracket.minLevel, bracket.maxLevel, bracket.players);
+
+    return result;
 }
 
 void BgAutoQueue::Update(uint32 diff)

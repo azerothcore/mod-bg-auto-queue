@@ -37,10 +37,25 @@ public:
 
     bool IsLevelEligible(uint8 level) const;
 
+    // Outcome of a queue pass, reported back to .bgevents run so an operator
+    // can see whether anyone was actually queued, broken down per bracket.
+    struct QueuePassResult
+    {
+        struct BracketCount
+        {
+            uint32 minLevel = 0;
+            uint32 maxLevel = 0;
+            uint32 players = 0;
+        };
+
+        uint32 players = 0;                 // total players queued across all brackets
+        std::vector<BracketCount> brackets; // one entry per bracket that queued >= 1 player, sorted by level
+    };
+
     // Runs a single per-bracket queue pass. Does NOT check _enabled — it is
     // invoked both by the periodic Update (enabled path) and by .bgevents run
     // (always), so the Enable/Interval gate lives only in Update.
-    void RunQueuePass();
+    QueuePassResult RunQueuePass();
 
     // Drives the periodic queue pass. Call from WorldScript::OnUpdate.
     void Update(uint32 diff);
@@ -59,6 +74,8 @@ private:
         std::vector<ObjectGuid> players;
         uint32 alliance = 0;
         uint32 horde = 0;
+        uint32 minLevel = 0; // bracket level range, used for logging purposes
+        uint32 maxLevel = 0;
     };
 
     // Shared per-player eligibility used by both the queue pass and the
@@ -82,8 +99,8 @@ private:
         BracketBucket const& bucket) const;
 
     // Queues every player in the bucket into bgTypeId, then schedules a single
-    // queue update for the bracket.
-    void QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket);
+    // queue update for the bracket. Returns the number of players queued.
+    uint32 QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket);
 
     void BroadcastWarning() const;
 

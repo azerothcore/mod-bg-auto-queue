@@ -77,7 +77,8 @@ public:
 
         if (result.players == 0)
         {
-            handler->SendSysMessage("Battleground event: no eligible players were queued.");
+            handler->PSendSysMessage("Battleground event: no players were queued (examined {} online player(s)).", result.considered);
+            ReportSkips(handler, result);
             return true;
         }
 
@@ -91,7 +92,36 @@ public:
         }
 
         handler->PSendSysMessage("Queued {} player(s) in total", result.players);
+        ReportSkips(handler, result);
         return true;
+    }
+
+private:
+    // Prints why online players were not queued, so an operator can tell an
+    // opted-out character from a wrong-level one (etc.) without reading logs.
+    static void ReportSkips(ChatHandler* handler, BgAutoQueue::QueuePassResult const& result)
+    {
+        bool any = false;
+        for (size_t i = 0; i < result.skipped.size(); ++i)
+        {
+            if (result.skipped[i] == 0)
+                continue;
+
+            if (!any)
+            {
+                handler->SendSysMessage("Skipped players:");
+                any = true;
+            }
+
+            BgAutoQueue::SkipReason reason = static_cast<BgAutoQueue::SkipReason>(i);
+            handler->PSendSysMessage("  {}: {} player(s)", BgAutoQueue::GetSkipReasonLabel(reason), result.skipped[i]);
+        }
+
+        if (result.bracketsWithoutBg > 0)
+            handler->PSendSysMessage("  no eligible battleground for their level: {} bracket(s)", result.bracketsWithoutBg);
+
+        if (result.skippedAtQueueTime > 0)
+            handler->PSendSysMessage("  dropped at queue time (state change or veto): {} player(s)", result.skippedAtQueueTime);
     }
 };
 

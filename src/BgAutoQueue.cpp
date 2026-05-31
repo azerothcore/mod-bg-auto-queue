@@ -156,41 +156,67 @@ bool BgAutoQueue::IsLevelEligible(uint8 level) const
     return level >= _levelMin && level <= _levelMax;
 }
 
-bool BgAutoQueue::IsEligible(Player* player) const
+char const* BgAutoQueue::GetSkipReasonLabel(SkipReason reason)
 {
-    if (!player || !player->IsInWorld())
+    switch (reason)
+    {
+        case SkipReason::NotInWorld:          return "not in world";
+        case SkipReason::OptedOut:            return "opted out (.bgevents off)";
+        case SkipReason::Level:               return "level outside configured range";
+        case SkipReason::Dungeon:             return "in a dungeon/raid";
+        case SkipReason::InBattleground:      return "already in a battleground";
+        case SkipReason::AlreadyQueued:       return "already queued / no free queue slot";
+        case SkipReason::Deserter:            return "deserter or cannot join";
+        case SkipReason::Lfg:                 return "using the LFG system";
+        case SkipReason::DeathKnightEbonHold: return "Death Knight locked to Ebon Hold";
+        case SkipReason::GameMaster:          return "game master";
+        case SkipReason::NoBracket:           return "no PvP bracket for level";
+        default:                              return "unknown";
+    }
+}
+
+bool BgAutoQueue::IsEligible(Player* player, SkipReason* reason) const
+{
+    auto fail = [reason](SkipReason value)
+    {
+        if (reason)
+            *reason = value;
         return false;
+    };
+
+    if (!player || !player->IsInWorld())
+        return fail(SkipReason::NotInWorld);
 
     std::string const& name = player->GetName();
 
     if (IsOptedOut(player))
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: opted out.", name);
-        return false;
+        return fail(SkipReason::OptedOut);
     }
 
     if (!IsLevelEligible(player->GetLevel()))
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: level {} outside [{}-{}].", name, player->GetLevel(), _levelMin, _levelMax);
-        return false;
+        return fail(SkipReason::Level);
     }
 
     if (player->GetMap()->IsDungeon())
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: in a dungeon/raid.", name);
-        return false;
+        return fail(SkipReason::Dungeon);
     }
 
     if (player->InBattleground())
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: already in a battleground.", name);
-        return false;
+        return fail(SkipReason::InBattleground);
     }
 
     if (player->InBattlegroundQueue() || !player->HasFreeBattlegroundQueueId())
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: already queued or no free queue slot.", name);
-        return false;
+        return fail(SkipReason::AlreadyQueued);
     }
 
     // Deserter check via any standard template (WSG).
@@ -199,7 +225,7 @@ bool BgAutoQueue::IsEligible(Player* player) const
         if (!player->CanJoinToBattleground(bgTemplate))
         {
             LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: CanJoinToBattleground=false (deserter?).", name);
-            return false;
+            return fail(SkipReason::Deserter);
         }
     }
 
@@ -209,7 +235,7 @@ bool BgAutoQueue::IsEligible(Player* player) const
         && (lfgState != lfg::LFG_STATE_QUEUED || !sWorld->getBoolConfig(CONFIG_ALLOW_JOIN_BG_AND_LFG)))
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: using the LFG system.", name);
-        return false;
+        return fail(SkipReason::Lfg);
     }
 
     // Death Knights still locked to Ebon Hold cannot be teleported to a BG yet.
@@ -219,13 +245,13 @@ bool BgAutoQueue::IsEligible(Player* player) const
         && !player->HasSpell(50977))
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: Death Knight not yet allowed to leave Ebon Hold.", name);
-        return false;
+        return fail(SkipReason::DeathKnightEbonHold);
     }
 
     if (_skipGameMasters && player->IsGameMaster())
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: game master.", name);
-        return false;
+        return fail(SkipReason::GameMaster);
     }
 
     return true;
@@ -348,7 +374,7 @@ BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracket
     return best;
 }
 
-uint32 BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket)
+uint32 BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket, uint32* skippedAtQueueTime)
 {
     Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
     if (!bgTemplate)
@@ -371,19 +397,29 @@ uint32 BgAutoQueue::QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const
 
         // Re-validate: state may have changed since the bucket was gathered.
         if (!IsEligible(player) || player->InBattlegroundQueueForBattlegroundQueueType(bgQueueTypeId))
+        {
+            if (skippedAtQueueTime)
+                ++*skippedAtQueueTime;
             continue;
+        }
 
         // BG-specific veto (can only run at queue time).
         GroupJoinBattlegroundResult err = ERR_BATTLEGROUND_NONE;
         if (!sScriptMgr->OnPlayerCanJoinInBattlegroundQueue(player, ObjectGuid::Empty, bgTypeId, 0, err))
         {
             LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: OnPlayerCanJoinInBattlegroundQueue veto.", player->GetName());
+            if (skippedAtQueueTime)
+                ++*skippedAtQueueTime;
             continue;
         }
 
         PvPDifficultyEntry const* bracketEntry = GetBattlegroundBracketByLevel(bgTemplate->GetMapId(), player->GetLevel());
         if (!bracketEntry)
+        {
+            if (skippedAtQueueTime)
+                ++*skippedAtQueueTime;
             continue;
+        }
 
         GroupQueueInfo* ginfo = bgQueue.AddGroup(player, nullptr, bgTypeId, bracketEntry, 0, false, false, 0, 0);
         uint32 avgWaitTime = bgQueue.GetAverageQueueWaitTime(ginfo);
@@ -415,14 +451,25 @@ BgAutoQueue::QueuePassResult BgAutoQueue::RunQueuePass()
 {
     std::unordered_map<BattlegroundBracketId, BracketBucket> buckets;
 
+    QueuePassResult result;
+
     for (auto const& [guid, player] : ObjectAccessor::GetPlayers())
     {
-        if (!IsEligible(player))
+        ++result.considered;
+
+        SkipReason reason = SkipReason::NotInWorld;
+        if (!IsEligible(player, &reason))
+        {
+            ++result.skipped[static_cast<size_t>(reason)];
             continue;
+        }
 
         PvPDifficultyEntry const* bracketEntry = GetBattlegroundBracketByLevel(BG_BRACKET_REFERENCE_MAP, player->GetLevel());
         if (!bracketEntry)
+        {
+            ++result.skipped[static_cast<size_t>(SkipReason::NoBracket)];
             continue;
+        }
 
         BracketBucket& bucket = buckets[bracketEntry->GetBracketId()];
         bucket.minLevel = bracketEntry->minLevel;
@@ -434,17 +481,17 @@ BgAutoQueue::QueuePassResult BgAutoQueue::RunQueuePass()
             ++bucket.horde;
     }
 
-    QueuePassResult result;
     for (auto const& [bracketId, bucket] : buckets)
     {
         BattlegroundTypeId bgTypeId = SelectBattlegroundForBracket(bracketId, bucket);
         if (bgTypeId == BATTLEGROUND_TYPE_NONE)
         {
             LOG_DEBUG("module", "mod-bg-auto-queue: bracket {} has no eligible battleground, skipping.", static_cast<uint32>(bracketId));
+            ++result.bracketsWithoutBg;
             continue;
         }
 
-        uint32 const queued = QueueBucket(bgTypeId, bucket);
+        uint32 const queued = QueueBucket(bgTypeId, bucket, &result.skippedAtQueueTime);
         if (queued > 0)
         {
             result.players += queued;

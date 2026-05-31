@@ -9,6 +9,7 @@
 #include "ObjectGuid.h"
 #include "SharedDefines.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -37,8 +38,31 @@ public:
 
     bool IsLevelEligible(uint8 level) const;
 
+    // Why an online player was not queued during a pass. Reported by
+    // .bgevents run so an operator can tell exactly which filter fired
+    // (e.g. an opted-out character looks identical to a wrong-level one
+    // from the outside).
+    enum class SkipReason : uint8
+    {
+        NotInWorld = 0,
+        OptedOut,
+        Level,
+        Dungeon,
+        InBattleground,
+        AlreadyQueued,
+        Deserter,
+        Lfg,
+        DeathKnightEbonHold,
+        GameMaster,
+        NoBracket,          // no PvP bracket for the level on the reference map
+        Count
+    };
+
+    static char const* GetSkipReasonLabel(SkipReason reason);
+
     // Outcome of a queue pass, reported back to .bgevents run so an operator
-    // can see whether anyone was actually queued, broken down per bracket.
+    // can see whether anyone was actually queued, broken down per bracket,
+    // plus why the rest were skipped.
     struct QueuePassResult
     {
         struct BracketCount
@@ -50,6 +74,11 @@ public:
 
         uint32 players = 0;                 // total players queued across all brackets
         std::vector<BracketCount> brackets; // one entry per bracket that queued >= 1 player, sorted by level
+
+        uint32 considered = 0;              // online players examined this pass
+        std::array<uint32, static_cast<size_t>(SkipReason::Count)> skipped{}; // per-reason skip tally
+        uint32 bracketsWithoutBg = 0;       // populated brackets with no eligible BG to queue into
+        uint32 skippedAtQueueTime = 0;      // eligible players dropped by re-check/veto at queue time
     };
 
     // Runs a single per-bracket queue pass. Does NOT check _enabled — it is
@@ -80,8 +109,9 @@ private:
 
     // Shared per-player eligibility used by both the queue pass and the
     // warning broadcast. Excludes the BG-specific OnPlayerCanJoinInBattleground
-    // Queue veto (that runs only at queue time).
-    bool IsEligible(Player* player) const;
+    // Queue veto (that runs only at queue time). When non-null, reason is set
+    // to the first failing filter (only meaningful when this returns false).
+    bool IsEligible(Player* player, SkipReason* reason = nullptr) const;
 
     // True when the player can be queued into bgTypeId at their level.
     bool CanEnter(Player* player, BattlegroundTypeId bgTypeId) const;
@@ -99,8 +129,11 @@ private:
         BracketBucket const& bucket) const;
 
     // Queues every player in the bucket into bgTypeId, then schedules a single
-    // queue update for the bracket. Returns the number of players queued.
-    uint32 QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket);
+    // queue update for the bracket. Returns the number of players queued. When
+    // non-null, skippedAtQueueTime is incremented for each bucket player
+    // dropped by the queue-time re-check or the BG-specific veto.
+    uint32 QueueBucket(BattlegroundTypeId bgTypeId, BracketBucket const& bucket,
+        uint32* skippedAtQueueTime = nullptr);
 
     void BroadcastWarning() const;
 

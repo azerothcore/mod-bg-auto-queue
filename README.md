@@ -7,37 +7,27 @@ with an in-game command.
 
 ## How it works
 
-On a configurable interval the module runs a **queue pass**:
+On a configurable interval the module runs a **queue pass**: it gathers every
+eligible online player, groups them by PvP level bracket (10-19, 20-29, …,
+70-79, never mixed), selects one battleground per bracket, and solo-queues
+everyone in that bracket into it. A warning is broadcast `WarningLeadTime`
+seconds before each pass. Players choose whether to accept the queue popup;
+declining carries no penalty and they are simply considered again next pass.
 
-1. It gathers every eligible online player and groups them by PvP level bracket
-   (10-19, 20-29, …, 70-79). Brackets are never mixed.
-2. For each populated bracket it selects one battleground:
-   - **Live-battleground reinforcement (priority).** If a battleground of any
-     normal type is already forming or in progress for that bracket and has
-     free slots, players are queued into it so they reinforce the live match.
-     This is not limited to the configured pool.
-   - **Otherwise, a random pick from the configured pool.** With a single
-     eligible candidate it is used as-is. With several, candidates whose
-     minimum players per team cannot be met by the bracket's available count
-     are dropped and one of the rest is chosen at random. If none meet the
-     threshold, the smallest battleground (typically Warsong Gulch) is chosen
-     anyway so players are still queued.
-3. Every player in the bracket is solo-queued (no premade groups) into the
-   chosen battleground.
+Battleground selection per bracket:
+- **Live-battleground reinforcement (priority).** If a normal battleground is
+  already forming or in progress for that bracket with free slots, players are
+  queued into it (not limited to the configured pool).
+- **Otherwise, a random pick** from `BgAutoQueue.Pool`, preferring candidates
+  whose minimum players per team the bracket can fill; if none qualify, the
+  smallest battleground is queued anyway.
 
-`WarningLeadTime` seconds before each pass, a generic warning is broadcast to
-the players who would be queued, reminding them how to opt out or back in.
+📖 **For the full, player-facing explanation** — when events fire, what players
+see, opt-out, battleground selection, the complete eligibility list, and the
+commands — see **[docs/how-it-works.md](docs/how-it-works.md)**.
 
-## Behaviour & interactions
+## Interactions with other systems
 
-- **Per-bracket matching never mixes brackets**; each bracket gets its own
-  battleground.
-- **Solo queue only** — players are queued individually, never as a premade.
-- **Re-queue on decline.** Declining or ignoring the queue popup carries no
-  penalty (no Deserter debuff — that only applies after entering and leaving a
-  battleground). The player is simply considered again on the next pass.
-- **Reload resets the timer** and re-applies `InitialDelay`. A player who logs
-  in between the warning and the pass is still queued, just without a warning.
 - **Deserter tracking noise.** If `Battleground.TrackDeserters.Enable` is enabled,
   players who decline auto-queue invites may appear in the deserter tracking
   table. This is informational only, not a player-facing penalty.
@@ -45,12 +35,6 @@ the players who would be queued, reminding them how to opt out or back in.
   immediate (non-timed) mode, a mass pass emits one world announcement per
   player. Consider `Battleground.QueueAnnouncer.Timed` /
   `…PlayerOnly` to avoid spam.
-
-A player is **eligible** when they are online and in the world, not opted out,
-within the configured level range, not in a dungeon/raid, not already in a
-battleground, not already in a battleground/arena queue, not a deserter, not
-using the LFG system, not a Death Knight still locked to Ebon Hold, and (when
-`SkipGameMasters` is on) not a game master.
 
 ## Operational notes
 

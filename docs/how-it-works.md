@@ -83,7 +83,8 @@ You're skipped for an event (this event only) if you're:
 - under a **Deserter** penalty,
 - **using the Dungeon Finder (LFG)**,
 - a **Death Knight still in the Ebon Hold starting zone**,
-- a **Game Master** (skipped by default; this can be turned off).
+- a **Game Master** (skipped by default; this can be turned off),
+- carrying one of the **configured skip auras** (a server setting).
 
 Once whatever's blocking you clears, you'll be considered again at the next
 event.

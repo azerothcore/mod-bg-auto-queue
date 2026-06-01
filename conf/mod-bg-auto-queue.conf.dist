@@ -130,4 +130,18 @@ BgAutoQueue.CrossFaction = 1
 
 BgAutoQueue.SkipGameMasters = 1
 
+#
+#    BgAutoQueue.SkipAuras
+#        Description: Comma-separated list of aura (spell) IDs. A player who has
+#                     any of these auras is skipped for the pass, in both the
+#                     warning and the queueing. Useful to let other systems flag
+#                     a character as temporarily exempt from auto-queue. Invalid
+#                     entries are rejected at load with a warning.
+#                     Example: "2000100, 2000101, 2000102" skips any player who
+#                     has aura 2000100, 2000101 or 2000102.
+#        Default:     "" - empty, the aura check is disabled
+#
+
+BgAutoQueue.SkipAuras = ""
+
 ###################################################################################################

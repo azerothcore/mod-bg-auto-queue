@@ -19,6 +19,7 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "StringConvert.h"
+#include "StringFormat.h"
 #include "Tokenize.h"
 #include "World.h"
 #include "WorldPacket.h"
@@ -111,13 +112,27 @@ void BgAutoQueue::LoadConfig()
     _skipGameMasters  = sConfigMgr->GetOption<bool>("BgAutoQueue.SkipGameMasters", true);
     _broadcastMessage = sConfigMgr->GetOption<std::string>("BgAutoQueue.BroadcastMessage", BG_AUTO_QUEUE_DEFAULT_BROADCAST);
 
+    _skipAuras.clear();
+    std::string const skipAurasStr = sConfigMgr->GetOption<std::string>("BgAutoQueue.SkipAuras", "");
+    for (std::string_view token : Acore::Tokenize(skipAurasStr, ',', false))
+    {
+        Optional<uint32> value = Acore::StringTo<uint32>(Acore::String::Trim(std::string(token)));
+        if (!value)
+        {
+            LOG_WARN("module", "BgAutoQueue.SkipAuras entry '{}' is not a valid number, ignoring.", token);
+            continue;
+        }
+
+        _skipAuras.push_back(*value);
+    }
+
     // Reset timing on (re)load. Reload re-applies InitialDelay — accepted.
     _elapsedMs   = 0;
     _warningSent = false;
     _firstPass   = true;
 
-    LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}.",
-        _enabled, _levelMin, _levelMax, _poolRaw.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters);
+    LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}, skipAuras={}.",
+        _enabled, _levelMin, _levelMax, _poolRaw.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters, _skipAuras.size());
 
     // Opt-out is stored via the core PlayerSettings system, which only persists
     // across logins when EnablePlayerSettings is on. Without it, .bgevents
@@ -184,6 +199,7 @@ char const* BgAutoQueue::GetSkipReasonLabel(SkipReason reason)
         case SkipReason::Lfg:                 return "using the LFG system";
         case SkipReason::DeathKnightEbonHold: return "Death Knight locked to Ebon Hold";
         case SkipReason::GameMaster:          return "game master";
+        case SkipReason::Aura:                return "has a configured skip aura";
         case SkipReason::NoBracket:           return "no PvP bracket for level";
         default:                              return "unknown";
     }
@@ -266,6 +282,15 @@ bool BgAutoQueue::IsEligible(Player* player, SkipReason* reason) const
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: game master.", name);
         return fail(SkipReason::GameMaster);
+    }
+
+    for (uint32 auraId : _skipAuras)
+    {
+        if (player->HasAura(auraId))
+        {
+            LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: has skip aura {}.", name, auraId);
+            return fail(SkipReason::Aura);
+        }
     }
 
     return true;

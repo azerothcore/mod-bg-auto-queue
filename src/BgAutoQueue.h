@@ -55,6 +55,7 @@ public:
         DeathKnightEbonHold,
         GameMaster,
         Aura,               // carries one of the configured skip auras
+        Afk,                // flagged AFK
         NoBracket,          // no PvP bracket for the level on the reference map
         Count
     };
@@ -154,6 +155,7 @@ private:
     uint32 _warningLeadMs = 60u * 1000u;
     bool _crossFaction = true;
     bool _skipGameMasters = true;
+    bool _skipAfk = true;
     std::vector<uint32> _skipAuras; // aura ids that exclude a player from a pass
     std::string _broadcastMessage;
 

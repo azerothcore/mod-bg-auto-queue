@@ -110,6 +110,7 @@ void BgAutoQueue::LoadConfig()
 
     _crossFaction     = sConfigMgr->GetOption<bool>("BgAutoQueue.CrossFaction", true);
     _skipGameMasters  = sConfigMgr->GetOption<bool>("BgAutoQueue.SkipGameMasters", true);
+    _skipAfk          = sConfigMgr->GetOption<bool>("BgAutoQueue.SkipAFK", true);
     _broadcastMessage = sConfigMgr->GetOption<std::string>("BgAutoQueue.BroadcastMessage", BG_AUTO_QUEUE_DEFAULT_BROADCAST);
 
     _skipAuras.clear();
@@ -131,8 +132,8 @@ void BgAutoQueue::LoadConfig()
     _warningSent = false;
     _firstPass   = true;
 
-    LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}, skipAuras={}.",
-        _enabled, _levelMin, _levelMax, _poolRaw.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters, _skipAuras.size());
+    LOG_INFO("module", "mod-bg-auto-queue: enabled={}, levels=[{}-{}], pool size={}, interval={} min, initialDelay={} s, warningLead={} s, crossFaction={}, skipGM={}, skipAFK={}, skipAuras={}.",
+        _enabled, _levelMin, _levelMax, _poolRaw.size(), intervalMin, initialDelaySec, warningLeadSec, _crossFaction, _skipGameMasters, _skipAfk, _skipAuras.size());
 
     // Opt-out is stored via the core PlayerSettings system, which only persists
     // across logins when EnablePlayerSettings is on. Without it, .bgevents
@@ -200,6 +201,7 @@ char const* BgAutoQueue::GetSkipReasonLabel(SkipReason reason)
         case SkipReason::DeathKnightEbonHold: return "Death Knight locked to Ebon Hold";
         case SkipReason::GameMaster:          return "game master";
         case SkipReason::Aura:                return "has a configured skip aura";
+        case SkipReason::Afk:                 return "flagged AFK";
         case SkipReason::NoBracket:           return "no PvP bracket for level";
         default:                              return "unknown";
     }
@@ -282,6 +284,12 @@ bool BgAutoQueue::IsEligible(Player* player, SkipReason* reason) const
     {
         LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: game master.", name);
         return fail(SkipReason::GameMaster);
+    }
+
+    if (_skipAfk && player->isAFK())
+    {
+        LOG_DEBUG("module", "mod-bg-auto-queue: skip {}: flagged AFK.", name);
+        return fail(SkipReason::Afk);
     }
 
     for (uint32 auraId : _skipAuras)

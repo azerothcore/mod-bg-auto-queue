@@ -131,6 +131,17 @@ BgAutoQueue.CrossFaction = 1
 BgAutoQueue.SkipGameMasters = 1
 
 #
+#    BgAutoQueue.SkipAFK
+#        Description: Skip players flagged as AFK in both the warning and the
+#                     queueing, so idle characters are not teleported into a
+#                     battleground.
+#        Default:     1 - Skip AFK players
+#                     0 - Include AFK players
+#
+
+BgAutoQueue.SkipAFK = 1
+
+#
 #    BgAutoQueue.SkipAuras
 #        Description: Comma-separated list of aura (spell) IDs. A player who has
 #                     any of these auras is skipped for the pass, in both the

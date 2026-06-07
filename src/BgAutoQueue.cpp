@@ -320,26 +320,85 @@ bool BgAutoQueue::CanEnter(Player* player, BattlegroundTypeId bgTypeId) const
     return GetBattlegroundBracketByLevel(bgTemplate->GetMapId(), player->GetLevel()) != nullptr;
 }
 
-bool BgAutoQueue::IsBracketEligible(BattlegroundTypeId bgTypeId, BracketBucket const& bucket) const
+bool BgAutoQueue::BucketHasAnyFit(BattlegroundTypeId bgTypeId, BracketBucket const& bucket) const
 {
     for (ObjectGuid guid : bucket.players)
     {
         Player* player = ObjectAccessor::FindPlayer(guid);
-        if (!player || !CanEnter(player, bgTypeId))
-            return false;
+        if (player && CanEnter(player, bgTypeId))
+            return true;
     }
 
-    return true;
+    return false;
 }
 
-bool BgAutoQueue::IsViable(Battleground* bgTemplate, BracketBucket const& bucket) const
+bool BgAutoQueue::BucketFitsLiveBg(Battleground* bg, BracketBucket const& bucket) const
+{
+    BattlegroundTypeId const bgTypeId = bg->GetBgTypeID();
+    for (ObjectGuid guid : bucket.players)
+    {
+        Player* player = ObjectAccessor::FindPlayer(guid);
+        if (!player || !player->GetBGAccessByLevel(bgTypeId))
+            continue;
+
+        PvPDifficultyEntry const* entry = GetBattlegroundBracketByLevel(bg->GetMapId(), player->GetLevel());
+        if (entry && entry->GetBracketId() == bg->GetBracketId())
+            return true;
+    }
+
+    return false;
+}
+
+BgAutoQueue::QueuedWaiters BgAutoQueue::CountUninvitedWaiters(BattlegroundTypeId bgTypeId,
+    BattlegroundBracketId bracketId) const
+{
+    QueuedWaiters waiters;
+
+    BattlegroundQueueTypeId bgQueueTypeId = BattlegroundMgr::BGQueueTypeId(bgTypeId, 0);
+    if (bgQueueTypeId == BATTLEGROUND_QUEUE_NONE)
+        return waiters;
+
+    BattlegroundQueue& bgQueue = sBattlegroundMgr->GetBattlegroundQueue(bgQueueTypeId);
+
+    static constexpr BattlegroundQueueGroupTypes WAITER_GROUP_TYPES[] =
+    {
+        BG_QUEUE_PREMADE_ALLIANCE,
+        BG_QUEUE_PREMADE_HORDE,
+        BG_QUEUE_NORMAL_ALLIANCE,
+        BG_QUEUE_NORMAL_HORDE,
+        BG_QUEUE_CFBG
+    };
+
+    for (BattlegroundQueueGroupTypes groupType : WAITER_GROUP_TYPES)
+    {
+        for (GroupQueueInfo const* gInfo : bgQueue.m_QueuedGroups[bracketId][groupType])
+        {
+            if (gInfo->IsInvitedToBGInstanceGUID != 0)
+                continue;
+
+            uint32 const count = static_cast<uint32>(gInfo->Players.size());
+            waiters.total += count;
+            if (gInfo->teamId == TEAM_ALLIANCE)
+                waiters.alliance += count;
+            else
+                waiters.horde += count;
+        }
+    }
+
+    return waiters;
+}
+
+bool BgAutoQueue::IsViable(Battleground* bgTemplate, BracketBucket const& bucket,
+    BattlegroundBracketId bracketId) const
 {
     uint32 const minPerTeam = bgTemplate->GetMinPlayersPerTeam();
+    QueuedWaiters const waiters = CountUninvitedWaiters(bgTemplate->GetBgTypeID(), bracketId);
 
     if (_crossFaction)
-        return (bucket.alliance + bucket.horde) >= (2u * minPerTeam);
+        return (bucket.alliance + bucket.horde + waiters.total) >= (2u * minPerTeam);
 
-    return bucket.alliance >= minPerTeam && bucket.horde >= minPerTeam;
+    return (bucket.alliance + waiters.alliance) >= minPerTeam
+        && (bucket.horde + waiters.horde) >= minPerTeam;
 }
 
 BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracketId bracketId, BracketBucket const& bucket) const
@@ -351,18 +410,18 @@ BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracket
         if (sDisableMgr->IsDisabledFor(DISABLE_TYPE_BATTLEGROUND, bgTypeId, nullptr))
             continue;
 
-        if (!IsBracketEligible(bgTypeId, bucket))
-            continue;
-
         for (Battleground* bg : sBattlegroundMgr->GetBGFreeSlotQueueStore(bgTypeId))
         {
-            if (bg->GetBracketId() != bracketId)
-                continue;
-
             if (!(bg->GetStatus() > STATUS_WAIT_QUEUE && bg->GetStatus() < STATUS_WAIT_LEAVE))
                 continue;
 
             if (!bg->HasFreeSlots())
+                continue;
+
+            // Match each live game by its own map-relative bracket, reinforced by
+            // whichever subset of bucket players fits it (off-boundary players are
+            // skipped at queue time, not blocking the whole game).
+            if (!BucketFitsLiveBg(bg, bucket))
                 continue;
 
             liveTypes.push_back(bgTypeId);
@@ -373,6 +432,40 @@ BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracket
     if (!liveTypes.empty())
         return Acore::Containers::SelectRandomContainerElement(liveTypes);
 
+    // (a2) Prefer a not-yet-running BG that already has uninvited queuers, so a
+    // manual queuer's chosen BG is reinforced instead of bypassed. Among viable
+    // candidates pick the one closest to popping (most waiters); ties at random.
+    std::vector<BattlegroundTypeId> waiterLeaders;
+    uint32 bestWaiters = 0;
+    for (BattlegroundTypeId bgTypeId : BG_NORMAL_TYPES)
+    {
+        if (sDisableMgr->IsDisabledFor(DISABLE_TYPE_BATTLEGROUND, bgTypeId, nullptr))
+            continue;
+
+        if (!BucketHasAnyFit(bgTypeId, bucket))
+            continue;
+
+        QueuedWaiters const waiters = CountUninvitedWaiters(bgTypeId, bracketId);
+        if (waiters.total == 0)
+            continue;
+
+        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+        if (!bgTemplate || !IsViable(bgTemplate, bucket, bracketId))
+            continue;
+
+        if (waiters.total > bestWaiters)
+        {
+            bestWaiters = waiters.total;
+            waiterLeaders.clear();
+            waiterLeaders.push_back(bgTypeId);
+        }
+        else if (waiters.total == bestWaiters)
+            waiterLeaders.push_back(bgTypeId);
+    }
+
+    if (!waiterLeaders.empty())
+        return Acore::Containers::SelectRandomContainerElement(waiterLeaders);
+
     // (b) Random pick from the configured pool.
     std::vector<BattlegroundTypeId> candidates;
     for (BattlegroundTypeId bgTypeId : _pool)
@@ -380,7 +473,7 @@ BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracket
         if (sDisableMgr->IsDisabledFor(DISABLE_TYPE_BATTLEGROUND, bgTypeId, nullptr))
             continue;
 
-        if (IsBracketEligible(bgTypeId, bucket))
+        if (BucketHasAnyFit(bgTypeId, bucket))
             candidates.push_back(bgTypeId);
     }
 
@@ -394,7 +487,7 @@ BattlegroundTypeId BgAutoQueue::SelectBattlegroundForBracket(BattlegroundBracket
     for (BattlegroundTypeId bgTypeId : candidates)
     {
         Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
-        if (bgTemplate && IsViable(bgTemplate, bucket))
+        if (bgTemplate && IsViable(bgTemplate, bucket, bracketId))
             viable.push_back(bgTypeId);
     }
 

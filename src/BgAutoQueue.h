@@ -118,15 +118,37 @@ private:
     // True when the player can be queued into bgTypeId at their level.
     bool CanEnter(Player* player, BattlegroundTypeId bgTypeId) const;
 
-    // True when every player in the bucket passes CanEnter for bgTypeId.
-    bool IsBracketEligible(BattlegroundTypeId bgTypeId, BracketBucket const& bucket) const;
+    // True when at least one bucket player can be queued into bgTypeId at their
+    // level (subset-friendly; QueueBucket skips the rest at queue time).
+    bool BucketHasAnyFit(BattlegroundTypeId bgTypeId, BracketBucket const& bucket) const;
+
+    // True when at least one bucket player resolves, on this live game's own map,
+    // to this game's own bracket and has BG access for its type.
+    bool BucketFitsLiveBg(Battleground* bg, BracketBucket const& bucket) const;
+
+    struct QueuedWaiters
+    {
+        uint32 total = 0;
+        uint32 alliance = 0;
+        uint32 horde = 0;
+    };
+
+    // Counts uninvited players already sitting in bgTypeId's core queue for this
+    // bracket, split by faction. Scans every solo/premade/cross-faction group
+    // bucket because which bucket a manual queuer lands in depends on whether
+    // mod-cfbg is active. Groups already invited to a forming instance are skipped.
+    QueuedWaiters CountUninvitedWaiters(BattlegroundTypeId bgTypeId,
+        BattlegroundBracketId bracketId) const;
 
     // Viability per CrossFaction: cross-faction => total >= 2*min; otherwise
-    // each faction tally >= min.
-    bool IsViable(Battleground* bgTemplate, BracketBucket const& bucket) const;
+    // each faction tally >= min. Includes uninvited players already queued for
+    // the candidate BG in this bracket, not just the freshly-gathered batch.
+    bool IsViable(Battleground* bgTemplate, BracketBucket const& bucket,
+        BattlegroundBracketId bracketId) const;
 
     // Selects the BG for a populated bracket: live-BG reinforcement first,
-    // then a random pick from the configured pool with documented fallbacks.
+    // then a not-yet-running BG that already has uninvited queuers, then a
+    // random pick from the configured pool with documented fallbacks.
     BattlegroundTypeId SelectBattlegroundForBracket(BattlegroundBracketId bracketId,
         BracketBucket const& bucket) const;
 
